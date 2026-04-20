@@ -127,6 +127,40 @@ function App(){
     return text.replace(/<PROFILE_UPDATE>[\s\S]*?<\/PROFILE_UPDATE>/g,"").trim();
   }
 
+  function tryModel(model,body){
+    var url="https://generativelanguage.googleapis.com/v1beta/models/"+model+":generateContent?key="+apiKey;
+    return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
+    .then(function(res){
+      if(!res.ok){
+        return res.json().catch(function(){return{}}).then(function(err){
+          var errMsg=(err.error&&err.error.message)||"Errore sconosciuto";
+          var isOverloaded=res.status===429||res.status===503||errMsg.indexOf("high demand")!==-1||errMsg.indexOf("overloaded")!==-1||errMsg.indexOf("RESOURCE_EXHAUSTED")!==-1;
+          return{ok:false,overloaded:isOverloaded,errMsg:errMsg};
+        });
+      }
+      return res.json().then(function(data){return{ok:true,data:data}});
+    });
+  }
+
+  function parseResponse(result){
+    if(!result.data||!result.data.candidates||!result.data.candidates[0])return{text:"\u26A0\uFE0F Risposta vuota. Riprova.",su:false};
+    var candidate=result.data.candidates[0];
+    var text="";
+    if(candidate.content&&candidate.content.parts){
+      text=candidate.content.parts.filter(function(p){return p.text}).map(function(p){return p.text}).join("\n");
+    }
+    if(!text)text="Errore nella risposta.";
+    var su=false;
+    if(candidate.groundingMetadata){
+      if(candidate.groundingMetadata.searchEntryPoint)su=true;
+      if(candidate.groundingMetadata.groundingChunks&&candidate.groundingMetadata.groundingChunks.length>0)su=true;
+    }
+    text=extractProfile(text);
+    return{text:text,su:su};
+  }
+
+  var MODELS=["gemini-2.5-flash","gemini-2.5-flash-lite","gemini-2.0-flash"];
+
   function callAPI(userParts){
     histRef.current.push({role:"user",parts:userParts});
     setStatus("Sto elaborando...");
@@ -137,33 +171,19 @@ function App(){
       tools:[{googleSearch:{}}],
       generationConfig:{maxOutputTokens:4096,temperature:0.8}
     };
-    var url="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key="+apiKey;
-    return fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
-    .then(function(res){
-      if(!res.ok){
-        return res.json().catch(function(){return{}}).then(function(err){
-          var errMsg=(err.error&&err.error.message)||"Errore sconosciuto";
-          if(res.status===429)return{text:"\u26A0\uFE0F Limite richieste raggiunto. Attendi qualche minuto.",su:false};
-          return{text:"\u26A0\uFE0F Errore API: "+errMsg,su:false};
+    return tryModel(MODELS[0],body).then(function(r1){
+      if(r1.ok){setStatus("");var p=parseResponse(r1);histRef.current.push({role:"model",parts:[{text:p.text}]});return p;}
+      if(!r1.overloaded){setStatus("");return{text:"\u26A0\uFE0F Errore API: "+r1.errMsg,su:false};}
+      setStatus("\u26A1 Flash occupato, provo Flash-Lite...");
+      return tryModel(MODELS[1],body).then(function(r2){
+        if(r2.ok){setStatus("");var p=parseResponse(r2);histRef.current.push({role:"model",parts:[{text:p.text}]});return p;}
+        if(!r2.overloaded){setStatus("");return{text:"\u26A0\uFE0F Errore API: "+r2.errMsg,su:false};}
+        setStatus("\u26A1 Anche Lite occupato, provo 2.0 Flash...");
+        return tryModel(MODELS[2],body).then(function(r3){
+          if(r3.ok){setStatus("");var p=parseResponse(r3);histRef.current.push({role:"model",parts:[{text:p.text}]});return p;}
+          setStatus("");
+          return{text:"\u26A0\uFE0F Tutti i modelli sono sovraccarichi. Riprova tra qualche minuto.",su:false};
         });
-      }
-      return res.json().then(function(data){
-        if(!data.candidates||!data.candidates[0])return{text:"\u26A0\uFE0F Risposta vuota. Riprova.",su:false};
-        var candidate=data.candidates[0];
-        var text="";
-        if(candidate.content&&candidate.content.parts){
-          text=candidate.content.parts.filter(function(p){return p.text}).map(function(p){return p.text}).join("\n");
-        }
-        if(!text)text="Errore nella risposta.";
-        var su=false;
-        if(candidate.groundingMetadata){
-          if(candidate.groundingMetadata.searchEntryPoint)su=true;
-          if(candidate.groundingMetadata.groundingChunks&&candidate.groundingMetadata.groundingChunks.length>0)su=true;
-        }
-        text=extractProfile(text);
-        histRef.current.push({role:"model",parts:[{text:text}]});
-        setStatus("");
-        return{text:text,su:su};
       });
     })
     .catch(function(e){
